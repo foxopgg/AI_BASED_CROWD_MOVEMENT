@@ -1,0 +1,14 @@
+# Core AI and Computer Vision
+ultralytics>=8.4.0      # Includes YOLO26 and Solutions (Heatmap, Counter)
+torch>=2.2.0            # PyTorch with CUDA support
+torchvision>=0.17.0     # Required for image transformations
+opencv-python>=4.9.0    # For GUI features like cv2.imshow()
+
+# Tracking and Geometry (Required for BoT-SORT/ByteTrack)
+shapely>=2.0.0          # Handles zone and line crossing math
+lapx>=0.5.5             # Efficient linear assignment for tracking IDs
+
+# Data Analytics and Logging
+pandas>=2.2.0           # For generating analytics_log.csv
+numpy>=1.26.0           # Core array processing
+datetime                # Standard library (usually included)
