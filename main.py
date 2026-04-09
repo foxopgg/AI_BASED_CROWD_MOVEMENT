@@ -9,7 +9,7 @@ def run_pro_analytics():
     # Path logic for your Linux setup
     
     
-    video_path = os.path.expanduser("~/campus_feed.mp4")
+    video_path = os.path.expanduser("~/C:\Users\USER\Documents\GitHub\AI_BASED_CROWD_MOVEMENTC:\Users\USER\Documents\GitHub\AI_BASED_CROWD_MOVEMENT")
     cap = cv2.VideoCapture(video_path)
     
     if not cap.isOpened():
