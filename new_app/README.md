@@ -59,8 +59,11 @@ http://localhost:8501
    - **Upload Video File** – upload your `campus_feed.mp4`
    - **CCTV Stream** – enter RTSP URL
    - **Webcam** – uses camera index 0
+   - **4 Cameras / Videos (Grid)** – upload up to 4 local videos or enter 4 live streams (RTSP/Webcam)
 3. Adjust confidence threshold
 4. Click **▶ Start Analysis**
+
+> **Note:** The maximum people count threshold is set to **5 people per frame** max for alerting and plotting.
 
 > Without YOLO installed, the app runs in **Simulation Mode** — it generates synthetic detections so you can demo the full interface.
 

@@ -46,9 +46,9 @@ def get_or_create_log() -> pd.DataFrame:
     n = 200
     now = datetime.datetime.now()
     times = [now - datetime.timedelta(minutes=(n - i) * 3) for i in range(n)]
-    entries = rng.integers(0, 8, n)
-    exits = rng.integers(0, 8, n)
-    counts = np.clip(np.cumsum(entries - exits), 0, 80).tolist()
+    entries = rng.integers(0, 3, n)
+    exits = rng.integers(0, 3, n)
+    counts = np.clip(np.cumsum(entries - exits), 0, 5).tolist()
     df = pd.DataFrame({
         "timestamp": times,
         "people_count": counts,
@@ -56,7 +56,7 @@ def get_or_create_log() -> pd.DataFrame:
         "exits": exits.tolist(),
         "zone": rng.choice(["Gate A", "Gate B", "Corridor", "Hall", "Plaza"], n).tolist(),
         "avg_speed": rng.uniform(0.5, 2.5, n).round(2).tolist(),
-        "density": (np.array(counts) / 80).round(2).tolist(),
+        "density": (np.array(counts) / 5).round(2).tolist(),
     })
     df.to_csv(LOG_PATH, index=False)
     return df
@@ -94,7 +94,7 @@ def colorize_heatmap(hm: np.ndarray) -> np.ndarray:
 def simulate_detection_frame(frame: np.ndarray, frame_idx: int):
     """Simulate YOLO detections on a frame (used when YOLO not installed)."""
     rng = np.random.default_rng(frame_idx % 100)
-    n_people = rng.integers(3, 12)
+    n_people = rng.integers(0, 6)
     h, w = frame.shape[:2]
     detections = []
     for i in range(n_people):
@@ -312,13 +312,25 @@ def page_live():
 
     col_ctrl, col_info = st.columns([1, 2])
     with col_ctrl:
-        source = st.selectbox("Input Source", ["Upload Video File", "CCTV Stream (RTSP)", "Webcam"])
+        source = st.selectbox("Input Source", ["Upload Video File", "CCTV Stream (RTSP)", "Webcam", "4 Cameras / Videos (Grid)"])
         uploaded = None
         rtsp_url = ""
+        grid_sources = []
         if source == "Upload Video File":
             uploaded = st.file_uploader("Upload MP4 / AVI", type=["mp4", "avi", "mov"])
         elif source == "CCTV Stream (RTSP)":
             rtsp_url = st.text_input("RTSP URL", placeholder="rtsp://192.168.1.1/stream")
+        elif source == "4 Cameras / Videos (Grid)":
+            st.markdown("<div style='font-size:0.85rem; color:#94a3b8;'>Configure 4 sources (leave blank to skip):</div>", unsafe_allow_html=True)
+            for i in range(4):
+                with st.expander(f"Source {i+1}", expanded=(i==0)):
+                    src_type = st.radio(f"Type {i}", ["Video File", "RTSP / Webcam"], horizontal=True, label_visibility="collapsed")
+                    if src_type == "Video File":
+                        file = st.file_uploader(f"Upload Video {i+1}", type=["mp4", "avi", "mov"], key=f"file_{i}")
+                        grid_sources.append({"type": "file", "val": file})
+                    else:
+                        url = st.text_input(f"URL or Camera Index for Source {i+1}", placeholder="rtsp://... or 0", key=f"url_{i}")
+                        grid_sources.append({"type": "url", "val": url})
         confidence = st.slider("Detection Confidence", 0.3, 0.95, 0.5, 0.05)
         show_heatmap_overlay = st.checkbox("Show Heatmap Overlay", value=False)
 
@@ -367,25 +379,48 @@ def page_live():
 
     if st.session_state.running:
         # Determine video source
-        cap = None
-        tmp_path = None
+        caps = []
+        import tempfile
+        tmp_dir = tempfile.gettempdir()
 
         if source == "Upload Video File" and uploaded is not None:
-            import tempfile
-            tmp_dir = tempfile.gettempdir()
             tmp_path = os.path.join(tmp_dir, f"uploaded_{uploaded.name}")
             with open(tmp_path, "wb") as f:
                 f.write(uploaded.getbuffer())
-            cap = cv2.VideoCapture(tmp_path)
+            caps.append(cv2.VideoCapture(tmp_path))
         elif source == "Webcam":
-            cap = cv2.VideoCapture(0)
+            caps.append(cv2.VideoCapture(0))
         elif source == "CCTV Stream (RTSP)" and rtsp_url:
-            cap = cv2.VideoCapture(rtsp_url)
+            caps.append(cv2.VideoCapture(rtsp_url))
+        elif source == "4 Cameras / Videos (Grid)":
+            for i, src in enumerate(grid_sources):
+                if src["type"] == "file" and src["val"] is not None:
+                    tmp_path = os.path.join(tmp_dir, f"uploaded_{i}_{src['val'].name}")
+                    with open(tmp_path, "wb") as f:
+                        f.write(src["val"].getbuffer())
+                    caps.append(cv2.VideoCapture(tmp_path))
+                elif src["type"] == "url" and src["val"]:
+                    val = src["val"]
+                    if val.isdigit(): val = int(val)
+                    caps.append(cv2.VideoCapture(val))
+                else:
+                    caps.append(None)
         else:
-            # Demo mode: generate synthetic frames
-            cap = None
+            caps.append(None)
 
         heatmap_acc = np.zeros((480, 640), dtype=np.float32)
+
+        # UI Placeholders for Video
+        placeholders = []
+        if source == "4 Cameras / Videos (Grid)":
+            c1, c2 = st.columns(2)
+            ph0 = c1.empty()
+            ph1 = c2.empty()
+            ph2 = c1.empty()
+            ph3 = c2.empty()
+            placeholders = [ph0, ph1, ph2, ph3]
+        else:
+            placeholders = [frame_placeholder]
 
         # Load YOLO if available
         yolo_model = None
@@ -399,55 +434,72 @@ def page_live():
         session_log = []
 
         while st.session_state.running:
-            if cap and cap.isOpened():
-                ret, frame = cap.read()
-                if not ret:
-                    st.session_state.running = False
-                    break
-                frame = cv2.resize(frame, (640, 480))
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            else:
-                # Generate a synthetic frame
-                frame_rgb = np.zeros((480, 640, 3), dtype=np.uint8)
-                frame_rgb[:] = (10, 20, 40)
-                cv2.putText(frame_rgb, "DEMO MODE – No video source",
-                            (100, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (56, 189, 248), 2)
+            total_n = 0
+            has_active_feed = False
 
-            # Detect
-            if yolo_model:
-                results = yolo_model.track(frame_rgb, persist=True, conf=confidence, classes=[0], verbose=False)
-                detections = []
-                if results[0].boxes is not None:
-                    for box in results[0].boxes:
-                        x1, y1, x2, y2 = box.xyxy[0].tolist()
-                        conf_val = float(box.conf[0])
-                        tid = int(box.id[0]) if box.id is not None else 0
-                        detections.append((int(x1), int(y1), int(x2), int(y2), conf_val, tid))
-            else:
-                detections = simulate_detection_frame(frame_rgb, frame_idx)
+            for i, cap in enumerate(caps):
+                if cap and cap.isOpened():
+                    has_active_feed = True
+                    ret, frame = cap.read()
+                    if not ret:
+                        # Re-loop video file
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        ret, frame = cap.read()
+                        if not ret: continue
+                    frame = cv2.resize(frame, (640, 480))
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                else:
+                    # Generate a synthetic frame if no valid feed or demo mode
+                    frame_rgb = np.zeros((480, 640, 3), dtype=np.uint8)
+                    frame_rgb[:] = (10, 20, 40)
+                    cv2.putText(frame_rgb, f"No Source {i+1}" if source == "4 Cameras / Videos (Grid)" else "DEMO MODE - No source",
+                                (100, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (56, 189, 248), 2)
 
-            frame_out = draw_detections(frame_rgb, detections, heatmap_acc)
+                # Detect
+                if yolo_model:
+                    results = yolo_model.predict(frame_rgb, conf=confidence, classes=[0], verbose=False)
+                    detections = []
+                    if results[0].boxes is not None:
+                        for box in results[0].boxes:
+                            x1, y1, x2, y2 = box.xyxy[0].tolist()
+                            conf_val = float(box.conf[0])
+                            # In predict mode there's no track id, so assign random UI id
+                            tid = random.randint(1, 99)
+                            detections.append((int(x1), int(y1), int(x2), int(y2), conf_val, tid))
+                else:
+                    detections = simulate_detection_frame(frame_rgb, frame_idx + i)
 
-            if show_heatmap_overlay:
-                hm_colored = colorize_heatmap(heatmap_acc)
-                hm_resized = cv2.resize(hm_colored, (640, 480))
-                frame_out = cv2.addWeighted(frame_out, 0.6, hm_resized, 0.4, 0)
+                frame_out = draw_detections(frame_rgb, detections, heatmap_acc)
 
-            # Timestamp
-            ts = datetime.datetime.now().strftime("%H:%M:%S")
-            cv2.putText(frame_out, ts, (520, 470), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 120, 160), 1)
+                if show_heatmap_overlay:
+                    hm_colored = colorize_heatmap(heatmap_acc)
+                    hm_resized = cv2.resize(hm_colored, (640, 480))
+                    frame_out = cv2.addWeighted(frame_out, 0.6, hm_resized, 0.4, 0)
 
-            frame_placeholder.image(frame_out, channels="RGB", use_container_width=True)
+                # Timestamp
+                ts = datetime.datetime.now().strftime("%H:%M:%S")
+                cv2.putText(frame_out, (f"Src:{i+1} " if source == "4 Cameras / Videos (Grid)" else "") + ts, (480, 470), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 120, 160), 1)
+
+                if i < len(placeholders):
+                    placeholders[i].image(frame_out, channels="RGB", use_container_width=True)
+
+                total_n += len(detections)
+
+            if not has_active_feed and source != "4 Cameras / Videos (Grid)" and uploaded is None and not rtsp_url and source != "Webcam":
+                # Only let single-feed demo mode run if nothing was explicitly setup
+                pass
+            
+            # Apply Maximum 5 people per frame threshold
+            total_n = min(total_n, 5)
 
             # Stats
-            n = len(detections)
-            entries_now = max(0, n - (session_log[-1]["count"] if session_log else n))
-            exits_now = max(0, (session_log[-1]["count"] if session_log else n) - n)
-            session_log.append({"ts": ts, "count": n, "entries": entries_now, "exits": exits_now})
+            entries_now = max(0, total_n - (session_log[-1]["count"] if session_log else total_n))
+            exits_now = max(0, (session_log[-1]["count"] if session_log else total_n) - total_n)
+            session_log.append({"ts": ts, "count": total_n, "entries": entries_now, "exits": exits_now})
 
             with stats_placeholder.container():
                 sc1, sc2, sc3, sc4 = st.columns(4)
-                sc1.metric("People in Frame", n)
+                sc1.metric("People Detected", total_n)
                 sc2.metric("Frame #", frame_idx)
                 sc3.metric("Entries", entries_now)
                 sc4.metric("Exits", exits_now)
@@ -456,21 +508,21 @@ def page_live():
             if frame_idx % 10 == 0:
                 save_to_log({
                     "timestamp": datetime.datetime.now(),
-                    "people_count": n,
+                    "people_count": total_n,
                     "entries": entries_now,
                     "exits": exits_now,
                     "zone": "Main Feed",
                     "avg_speed": round(random.uniform(0.8, 2.2), 2),
-                    "density": round(n / 80, 2),
+                    "density": round(total_n / 5, 2),
                 })
                 # Save heatmap
                 np.save(HEATMAP_PATH, heatmap_acc)
 
             frame_idx += 1
-            time.sleep(0.03)  # ~30 fps cap
+            time.sleep(0.01)
 
-        if cap:
-            cap.release()
+        for cap in caps:
+            if cap: cap.release()
         st.success("Analysis stopped.")
 
 
@@ -533,19 +585,31 @@ def page_heatmap():
 
     if HAS_PLOTLY:
         st.markdown('<div class="section-header">3D Density Surface</div>', unsafe_allow_html=True)
-        ds = hm[::10, ::10]  # downsample
+        try:
+            import scipy.ndimage as ndimage
+            smoothed_hm = ndimage.gaussian_filter(hm, sigma=3)
+            ds = smoothed_hm[::8, ::8]
+        except ImportError:
+            ds = hm[::10, ::10]
+            
         fig = go.Figure(data=[go.Surface(
-            z=ds, colorscale="Jet", showscale=False
+            z=ds, colorscale="Inferno", showscale=True,
+            colorbar=dict(title="Density", titleside="right", thickness=15, len=0.6, bgcolor="rgba(0,0,0,0)"),
+            lighting=dict(ambient=0.6, diffuse=0.8, fresnel=0.5, specular=0.5, roughness=0.1),
+            hoverinfo="z"
         )])
         fig.update_layout(
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="#94a3b8"),
+            font=dict(color="#e2e8f0", family="Syne"),
             scene=dict(
-                xaxis=dict(backgroundcolor="rgba(0,0,0,0)", gridcolor="#1e2d4a"),
-                yaxis=dict(backgroundcolor="rgba(0,0,0,0)", gridcolor="#1e2d4a"),
-                zaxis=dict(backgroundcolor="rgba(0,0,0,0)", gridcolor="#1e2d4a"),
+                xaxis=dict(title="X-Axis", backgroundcolor="rgba(0,0,0,0)", gridcolor="#1e2d4a", showbackground=False, zerolinecolor="#1e2d4a"),
+                yaxis=dict(title="Y-Axis", backgroundcolor="rgba(0,0,0,0)", gridcolor="#1e2d4a", showbackground=False, zerolinecolor="#1e2d4a"),
+                zaxis=dict(title="Crowd Density", backgroundcolor="rgba(0,0,0,0)", gridcolor="#1e2d4a", showbackground=False, zerolinecolor="#1e2d4a"),
+                aspectmode='manual',
+                aspectratio=dict(x=1.5, y=1, z=0.5),
+                camera=dict(eye=dict(x=1.5, y=-1.5, z=0.8))
             ),
-            margin=dict(l=0, r=0, t=0, b=0), height=400,
+            margin=dict(l=0, r=0, t=10, b=10), height=550,
         )
         st.plotly_chart(fig, use_container_width=True)
 
@@ -670,7 +734,7 @@ def page_settings():
 
         st.markdown('<div class="section-header">Alert Settings</div>', unsafe_allow_html=True)
         with st.form("alert_settings"):
-            crowd_alert = st.number_input("Crowd Alert Threshold (people)", 1, 500, 50)
+            crowd_alert = st.number_input("Crowd Alert Threshold (people)", 1, 5, 5)
             density_alert = st.slider("Density Alert (%)", 0, 100, 70)
             enable_email = st.checkbox("Enable Email Alerts")
             email = st.text_input("Alert Email", placeholder="admin@example.com", disabled=not enable_email)
